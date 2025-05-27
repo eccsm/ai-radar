@@ -1,0 +1,27 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+
+  - job_name: 'nats'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['nats:8222']
+
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+
+  - job_name: 'ai-radar-services'
+    static_configs:
+      - targets: ['toolhub:8000']
+        labels:
+          service: 'toolhub'

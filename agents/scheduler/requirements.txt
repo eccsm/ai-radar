@@ -1,0 +1,8 @@
+# Scheduler Agent Requirements
+python-dotenv>=1.0.0
+nats-py>=2.4.0
+pydantic>=2.4.2
+asyncpg
+asyncio>=3.4.3
+croniter>=1.4.1
+python-dateutil>=2.8.2

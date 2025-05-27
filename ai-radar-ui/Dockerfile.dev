@@ -1,0 +1,24 @@
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Install wget for healthcheck
+RUN apk add --no-cache wget
+
+# Update npm to the latest stable version
+RUN npm install -g npm@11.4.1
+
+# Install dependencies
+COPY package.json ./
+RUN npm install
+
+# Start in development mode with hot reloading
+# We will mount the source code as a volume in docker-compose
+CMD ["npm", "start"]
+
+# Expose the React development server port
+EXPOSE 3000
+
+# Add healthcheck
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+  CMD wget -q --spider http://localhost:3000 || exit 1
