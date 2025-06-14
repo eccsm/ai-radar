@@ -17,7 +17,6 @@ import numpy as np
 import aioboto3
 from openai import AsyncOpenAI
 from io import BytesIO
-import asyncpg
 import minio
 
 # --- DIAGNOSTIC PRINTS START ---
@@ -281,71 +280,6 @@ class SummariserAgent(BaseAgent):
             # Acknowledge message to avoid redelivery
             await msg.ack()
             return
-    async def retry_db_operation(self, operation, *args, max_retries=5, **kwargs):
-        """Retry a database operation with exponential backoff.
-        
-        Args:
-            operation: Async function to retry (e.g., self.db.fetch)
-            *args: Arguments to pass to the operation
-            max_retries: Maximum number of retry attempts
-            **kwargs: Keyword arguments to pass to the operation
-            
-        Returns:
-            The result of the operation if successful
-            
-        Raises:
-            Exception: If all retries fail
-        """
-        retries = 0
-        last_error = None
-        
-        while retries < max_retries:
-            try:
-                # Attempt operation
-                result = await operation(*args, **kwargs)
-                return result
-            except asyncpg.exceptions.ConnectionDoesNotExistError as e:
-                retries += 1
-                wait_time = 2 ** retries  # Exponential backoff
-                last_error = e
-                self.logger.warning(f"Database connection error: {e}, retrying in {wait_time}s (attempt {retries}/{max_retries})")
-                # Sleep with exponential backoff
-                await asyncio.sleep(wait_time)
-            except asyncpg.exceptions.TooManyConnectionsError as e:
-                # Special handling for connection pool exhaustion
-                retries += 1
-                # Use shorter wait times for connection issues, as we just need to let connections free up
-                wait_time = min(1 * retries, 5)  # Linear backoff with 5s max
-                self.logger.warning(f"Too many database connections, waiting before retry (attempt {retries}/{max_retries})")
-                await asyncio.sleep(wait_time)
-            except asyncpg.exceptions.PostgresConnectionError as e:
-                # For connection errors, try to reconnect
-                retries += 1
-                wait_time = 2 ** retries  # Exponential backoff
-                self.logger.warning(f"PostgreSQL connection error: {e}, attempting to reconnect (attempt {retries}/{max_retries})")
-                
-                try:
-                    await self.db.connect()
-                    self.logger.info("Successfully reconnected to PostgreSQL")
-                    # Try the operation again immediately after reconnecting
-                    continue
-                except Exception as reconnect_err:
-                    self.logger.error(f"Failed to reconnect to PostgreSQL: {reconnect_err}")
-                
-                self.logger.info(f"Waiting {wait_time} seconds before retry...")
-                await asyncio.sleep(wait_time)
-            except Exception as e:
-                # For other exceptions, retry with backoff
-                last_error = e
-                retries += 1
-                wait_time = 2 ** retries
-                self.logger.error(f"Database operation failed: {e}, retrying in {wait_time}s (attempt {retries}/{max_retries})")
-                await asyncio.sleep(wait_time)
-                
-        # If we've exhausted all retries, raise the last error
-        if last_error:
-            self.logger.error(f"Failed after {max_retries} retries: {last_error}")
-            raise last_error
     
     async def setup(self):
         """Initialize the summariser agent, retrieving secrets and setting up clients."""

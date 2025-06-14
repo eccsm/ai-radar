@@ -14,7 +14,6 @@ from datetime import datetime, timedelta
 from tenacity import retry, stop_after_attempt, wait_exponential
 import numpy as np
 from openai import AsyncOpenAI
-import asyncpg
 
 # --- DIAGNOSTIC PRINTS START ---
 print("--- Ranker Diagnostic Info ---")
@@ -323,44 +322,6 @@ Provide ONLY a numerical score between 0.0 (low importance) and 1.0 (extremely i
             # Acknowledge to avoid redelivery
             await msg.ack()
 
-    async def retry_db_operation(self, operation, *args, max_retries=5, **kwargs):
-        """Retry a database operation with exponential backoff."""
-        retries = 0
-        last_error = None
-        
-        while retries < max_retries:
-            try:
-                result = await operation(*args, **kwargs)
-                return result
-            except asyncpg.exceptions.ConnectionDoesNotExistError as e:
-                retries += 1
-                wait_time = 2 ** retries
-                last_error = e
-                self.logger.warning(f"Database connection error: {e}, retrying in {wait_time}s (attempt {retries}/{max_retries})")
-                await asyncio.sleep(wait_time)
-            except asyncpg.exceptions.PostgresConnectionError as e:
-                retries += 1
-                wait_time = 2 ** retries
-                self.logger.warning(f"PostgreSQL connection error: {e}, attempting to reconnect (attempt {retries}/{max_retries})")
-                
-                try:
-                    await self.db.connect()
-                    self.logger.info("Successfully reconnected to PostgreSQL")
-                    continue
-                except Exception as reconnect_err:
-                    self.logger.error(f"Failed to reconnect to PostgreSQL: {reconnect_err}")
-                
-                await asyncio.sleep(wait_time)
-            except Exception as e:
-                last_error = e
-                retries += 1
-                wait_time = 2 ** retries
-                self.logger.error(f"Database operation failed: {e}, retrying in {wait_time}s (attempt {retries}/{max_retries})")
-                await asyncio.sleep(wait_time)
-                
-        if last_error:
-            self.logger.error(f"Failed after {max_retries} retries: {last_error}")
-            raise last_error
 
     async def setup(self):
         """Initialize the ranker agent, retrieving secrets and setting up clients."""
