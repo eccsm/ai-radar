@@ -16,28 +16,35 @@ RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 # Copy requirements first for better caching
-COPY agents/summariser/requirements.txt .
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
-# Create directory structure
-RUN mkdir -p /app/agents/summariser
-RUN mkdir -p /app/_core
 
 # Production stage - final image
 FROM base as production
 
-# Copy shared _core module
-COPY _core/ /app/_core/
+# _core module will be handled by PYTHONPATH and volume mount in docker-compose
 
-# Copy agent-specific code
-COPY agents/_core/ /app/agents/_core/
-COPY agents/summariser/ /app/agents/summariser/
+# VERY explicitly copy the critical files by name
+COPY main.py /app/main.py
+COPY requirements.txt /app/requirements.txt
+COPY healthz.py /app/healthz.py
+
+# Create _core directory 
+RUN mkdir -p /app/_core
 
 # Set PYTHONPATH to include app directory
+# This will be overridden by docker-compose if needed for dev volume mounts
 ENV PYTHONPATH=/app
 
+# Add hvac for Vault integration
+RUN pip install hvac
+
+# Debug info
+RUN echo "Content of app directory:" && ls -la /app
+RUN echo "PYTHONPATH=$PYTHONPATH"
+
 # Command to run the agent
-CMD ["python", "/app/agents/summariser/main.py"]
+CMD ["python", "main.py"]
 
 # Development stage
 FROM base as development
@@ -49,4 +56,4 @@ FROM base as development
 ENV PYTHONPATH=/app
 
 # Command to run the agent
-CMD ["python", "/app/agents/summariser/main.py"]
+CMD ["python", "main.py"]

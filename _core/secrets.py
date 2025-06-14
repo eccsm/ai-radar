@@ -164,38 +164,40 @@ class SecretsManager:
         if name in self.secrets_cache:
             return self.secrets_cache[name]
             
-        # Try Vault secret first (prioritized)
-        # Map common secret patterns to Vault paths
-        vault_value = None
-        
-        # Special case handling for common secret patterns
-        if name.startswith("POSTGRES_") or name.startswith("DB_"):
-            # Database secrets
-            key = name.replace("POSTGRES_", "").replace("DB_", "").lower()
-            vault_value = self._read_vault_secret("database", key)
-        elif name.startswith("NATS_"):
-            # NATS secrets
-            key = name.replace("NATS_", "").lower()
-            vault_value = self._read_vault_secret("nats", key)
-        elif name.startswith("MINIO_"):
-            # MinIO secrets
-            key = name.replace("MINIO_", "").lower()
-            vault_value = self._read_vault_secret("minio", key)
-        elif name.endswith("_KEY") or name.endswith("_API_KEY") or name.endswith("_TOKEN"):
-            # API keys and tokens
-            key = name.lower().replace("_api_key", "").replace("_key", "").replace("_token", "")
-            vault_value = self._read_vault_secret("api-keys", key)
-        elif "_" in name:
-            # Generic pattern: SERVICE_KEY -> service/key
-            parts = name.lower().split("_")
-            if len(parts) >= 2:
-                path = parts[0]
-                key = "_".join(parts[1:])
-                vault_value = self._read_vault_secret(path, key)
-        
-        if vault_value is not None:
-            self.secrets_cache[name] = vault_value
-            return vault_value
+        # Temporarily skip Vault for MinIO endpoint to force environment variable usage
+        if name != "MINIO_ENDPOINT":
+            # Try Vault secret first (prioritized)
+            # Map common secret patterns to Vault paths
+            vault_value = None
+            
+            # Special case handling for common secret patterns
+            if name.startswith("POSTGRES_") or name.startswith("DB_"):
+                # Database secrets
+                key = name.replace("POSTGRES_", "").replace("DB_", "").lower()
+                vault_value = self._read_vault_secret("database", key)
+            elif name.startswith("NATS_"):
+                # NATS secrets
+                key = name.replace("NATS_", "").lower()
+                vault_value = self._read_vault_secret("nats", key)
+            elif name.startswith("MINIO_"):
+                # MinIO secrets
+                key = name.replace("MINIO_", "").lower()
+                vault_value = self._read_vault_secret("minio", key)
+            elif name.endswith("_KEY") or name.endswith("_API_KEY") or name.endswith("_TOKEN"):
+                # API keys and tokens
+                key = name.lower().replace("_api_key", "").replace("_key", "").replace("_token", "")
+                vault_value = self._read_vault_secret("api-keys", key)
+            elif "_" in name:
+                # Generic pattern: SERVICE_KEY -> service/key
+                parts = name.lower().split("_")
+                if len(parts) >= 2:
+                    path = parts[0]
+                    key = "_".join(parts[1:])
+                    vault_value = self._read_vault_secret(path, key)
+            
+            if vault_value is not None:
+                self.secrets_cache[name] = vault_value
+                return vault_value
         
         # Try environment variable
         value = os.getenv(name)
@@ -271,7 +273,7 @@ class SecretsManager:
             Dictionary with MinIO configuration
         """
         return {
-            "endpoint": self.get_secret("MINIO_ENDPOINT", "minio:9000"),
+            "endpoint": self.get_secret("MINIO_ENDPOINT", "http://minio:9000"),
             "access_key": self.get_secret("AWS_ACCESS_KEY_ID", "minio"),
             "secret_key": self.get_secret("AWS_SECRET_ACCESS_KEY", "minio_pwd"),
             "bucket": self.get_secret("BUCKET_NAME", "ai-radar-content")
@@ -294,3 +296,15 @@ class SecretsManager:
             NewsAPI key
         """
         return self.get_secret("NEWSAPI_KEY", "")
+
+    def get_linkedin_config(self) -> Dict[str, str]:
+        """
+        Get LinkedIn configuration for sharing.
+        
+        Returns:
+            Dictionary with LinkedIn configuration
+        """
+        return {
+            "access_token": self.get_secret("LINKEDIN_ACCESS_TOKEN", ""),
+            "author_urn": self.get_secret("LINKEDIN_AUTHOR_URN", "")
+        }

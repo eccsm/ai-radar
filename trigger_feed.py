@@ -1,9 +1,19 @@
 #!/usr/bin/env python
+"""
+RSS Feed Trigger Script for AI Radar
+Manually triggers RSS feed fetching by publishing tasks to NATS
+"""
 import asyncio
-import nats
 import json
 import os
 import sys
+
+# Try to import nats-py, install if missing
+try:
+    import nats
+except ImportError:
+    print("nats-py not found. Please install it with: pip install nats-py")
+    sys.exit(1)
 
 async def main():
     # Try different NATS URLs to handle both Docker and local environments

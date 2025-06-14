@@ -3,25 +3,41 @@ global:
   evaluation_interval: 15s
 
 scrape_configs:
+  # Prometheus itself
   - job_name: 'prometheus'
     static_configs:
       - targets: ['localhost:9090']
 
-  - job_name: 'cadvisor'
-    static_configs:
-      - targets: ['cadvisor:8080']
-
+  # NATS Exporter
   - job_name: 'nats'
-    metrics_path: '/metrics'
     static_configs:
-      - targets: ['nats:8222']
+      - targets: ['nats-exporter:7777']
+    scrape_interval: 15s
+    scrape_timeout: 10s
 
+  # PostgreSQL Exporter
   - job_name: 'postgres'
     static_configs:
       - targets: ['postgres-exporter:9187']
 
-  - job_name: 'ai-radar-services'
+  # cAdvisor for container metrics
+  - job_name: 'cadvisor'
     static_configs:
-      - targets: ['toolhub:8000']
-        labels:
-          service: 'toolhub'
+      - targets: ['cadvisor:8080']
+
+  # AI Radar Services (using service discovery labels)
+  - job_name: 'ai-radar-services'
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+    relabel_configs:
+      - source_labels: [__meta_docker_container_label_io_prometheus_scrape]
+        regex: 'true'
+        action: keep
+      - source_labels: [__meta_docker_container_label_io_prometheus_port]
+        target_label: __address__
+        replacement: '$1'
+      - source_labels: [__meta_docker_container_name]
+        target_label: instance
+      - source_labels: [__meta_docker_container_label_io_prometheus_path]
+        target_label: __metrics_path__
+        regex: '(.+)'

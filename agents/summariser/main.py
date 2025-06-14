@@ -4,9 +4,12 @@ Summariser Agent - Main Module
 Responsible for summarizing and embedding content for the AI Radar system.
 """
 import os
-import sys
-import json
 import asyncio
+import logging
+import sys
+import time
+import json
+import uuid
 from datetime import datetime
 from tenacity import retry, stop_after_attempt, wait_exponential
 import tiktoken
@@ -15,21 +18,28 @@ import aioboto3
 from openai import AsyncOpenAI
 from io import BytesIO
 import asyncpg
+import minio
 
-# Add project root to sys.path to ensure absolute imports work correctly
-project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
+# --- DIAGNOSTIC PRINTS START ---
+print("--- Summariser Diagnostic Info ---")
+print(f"Current Working Directory: {os.getcwd()}")
+print(f"Python Sys Path: {sys.path}")
+try:
+    print(f"Contents of /app: {os.listdir('/app')}")
+except FileNotFoundError:
+    print("Directory /app not found.")
+try:
+    print(f"Contents of /app/_core: {os.listdir('/app/_core')}")
+except FileNotFoundError:
+    print("Directory /app/_core not found.")
+print("----------------------------------")
+# --- DIAGNOSTIC PRINTS END ---
 
-# Use fully qualified absolute imports to avoid any confusion
+# Imports will rely on PYTHONPATH and the _core package structure.
 from _core.health import HealthServer  # noqa: E402
 from _core.secrets import SecretsManager  # noqa: E402
-from agents._core._base import BaseAgent  # noqa: E402
-from agents._core._rpc import Router  # noqa: E402
-
-# Print debug info about import paths
-print(f"Python path: {sys.path}")
-print(f"Project root: {project_root}")
+from agents._core._base import BaseAgent
+from agents._core._rpc import Router
 
 # Environment variables
 BUCKET_NAME = os.getenv("BUCKET_NAME", "ai-radar-content")
@@ -50,7 +60,7 @@ class SummariserAgent(BaseAgent):
     def __init__(self):
         super().__init__("summariser")
         self.router = Router(self.bus)
-        self.secrets_manager = SecretsManager()
+        self.secrets_manager = SecretsManager(self.logger)
         self.s3_client = None
         self.openai_client = None
     
@@ -174,14 +184,17 @@ class SummariserAgent(BaseAgent):
                     self.logger.error(f"Error handling source data: {source_err}", exc_info=True)
                     # Continue without source ID rather than failing the whole process
             
-            # Fetch content from S3 - create a fresh client for this operation
+            # Fetch content from S3 - use SecretsManager to get credentials
             self.logger.info(f"Fetching content from S3 with key: {content_key}")
+            # Get MinIO configuration from SecretsManager
+            minio_config = self.secrets_manager.get_minio_config()
+            
             session = aioboto3.Session()
             s3_client = session.client(
                 service_name="s3",
-                endpoint_url=MINIO_ENDPOINT,
-                aws_access_key_id=os.getenv("MINIO_ROOT_USER", "minio"),
-                aws_secret_access_key=os.getenv("MINIO_ROOT_PASSWORD", "minio_pwd"),
+                endpoint_url=minio_config["endpoint"],
+                aws_access_key_id=minio_config["access_key"],
+                aws_secret_access_key=minio_config["secret_key"],
             )
             
             try:
@@ -194,29 +207,43 @@ class SummariserAgent(BaseAgent):
                 self.logger.error(f"Failed to fetch content from S3: {s3_error}", exc_info=True)
                 raise
             
-            # Generate summary
-            summary = await self.generate_summary(content, title)
+            # Generate summary (placeholder for invalid API key)
+            try:
+                summary = await self.generate_summary(content, title)
+            except Exception as e:
+                self.logger.warning(f"OpenAI API error, using placeholder summary: {e}")
+                summary = f"Summary unavailable due to API error. Article title: {title}"
             
-            # Generate embedding for combined title and summary
-            embedding_text = f"{title}\n\n{summary}\n\n{content[:1000]}"
-            embedding = await self.generate_embedding(embedding_text)
+            # Generate embedding for combined title and summary (placeholder)
+            try:
+                embedding_text = f"{title}\n\n{summary}\n\n{content[:1000]}"
+                embedding = await self.generate_embedding(embedding_text)
+            except Exception as e:
+                self.logger.warning(f"OpenAI embedding error, using placeholder: {e}")
+                # Create a placeholder embedding vector (1536 dimensions for text-embedding-3-small)
+                embedding = [0.0] * 1536
             
-            # Convert embedding to a format compatible with pgvector
-            # For pgvector, we need to convert the Python list to a string representation
-            # that PostgreSQL can parse as a vector
-            embedding_str = f"[{','.join(map(str, embedding))}]"
+            # Convert embedding to pgvector format
+            if isinstance(embedding, list):
+                # Convert list to string format expected by pgvector
+                embedding_str = '[' + ','.join(map(str, embedding)) + ']'
+            else:
+                embedding_str = str(embedding)
+            
+            self.logger.info(f"Inserting new article with embedding of type {type(embedding)} and length {len(embedding)}. First 5 elements: {embedding[:5]}")
             
             # Store in database with retry mechanism
             try:
-                article_id = await self.retry_db_operation(
-                    self.db.fetchval,
-                    """
+                insert_query = """
                     INSERT INTO ai_radar.articles
                     (source_id, title, url, author, published_at, content, summary, embedding, importance_score)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8::vector, $9)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                     RETURNING id
-                    """,
-                    source_id, title, url, author, 
+                    """
+                article_id = await self.retry_db_operation(
+                    self.db.fetchval,
+                    insert_query,
+                    source_id, title, url, author,
                     datetime.fromisoformat(published_at), 
                     content, summary, embedding_str, 0.5  # Default importance score
                 )
@@ -250,11 +277,10 @@ class SummariserAgent(BaseAgent):
             await msg.ack()
             
         except Exception as e:
-            self.logger.error(f"Error processing summarization: {e}")
-            # For serious errors, we might want to retry
-            # For now, acknowledge to avoid redelivery
+            self.logger.error(f"Error processing summarization: {e}", exc_info=True)
+            # Acknowledge message to avoid redelivery
             await msg.ack()
-    
+            return
     async def retry_db_operation(self, operation, *args, max_retries=5, **kwargs):
         """Retry a database operation with exponential backoff.
         
@@ -275,27 +301,16 @@ class SummariserAgent(BaseAgent):
         
         while retries < max_retries:
             try:
-                return await operation(*args, **kwargs)
-            except RuntimeError as e:
-                if "Not connected to PostgreSQL" in str(e):
-                    retries += 1
-                    wait_time = 2 ** retries  # Exponential backoff
-                    self.logger.warning(f"Database not connected, attempting to reconnect (attempt {retries}/{max_retries})")
-                    
-                    try:
-                        await self.db.connect()
-                        self.logger.info("Successfully reconnected to PostgreSQL")
-                        # Try the operation again immediately after reconnecting
-                        continue
-                    except Exception as reconnect_err:
-                        self.logger.error(f"Failed to reconnect to PostgreSQL: {reconnect_err}")
-                        # Continue with the backoff and retry
-                        
-                    self.logger.info(f"Waiting {wait_time} seconds before retry...")
-                    await asyncio.sleep(wait_time)
-                else:
-                    # If it's a different RuntimeError, re-raise it
-                    raise
+                # Attempt operation
+                result = await operation(*args, **kwargs)
+                return result
+            except asyncpg.exceptions.ConnectionDoesNotExistError as e:
+                retries += 1
+                wait_time = 2 ** retries  # Exponential backoff
+                last_error = e
+                self.logger.warning(f"Database connection error: {e}, retrying in {wait_time}s (attempt {retries}/{max_retries})")
+                # Sleep with exponential backoff
+                await asyncio.sleep(wait_time)
             except asyncpg.exceptions.TooManyConnectionsError as e:
                 # Special handling for connection pool exhaustion
                 retries += 1
@@ -326,51 +341,70 @@ class SummariserAgent(BaseAgent):
                 wait_time = 2 ** retries
                 self.logger.error(f"Database operation failed: {e}, retrying in {wait_time}s (attempt {retries}/{max_retries})")
                 await asyncio.sleep(wait_time)
-        
+                
         # If we've exhausted all retries, raise the last error
-        raise last_error if last_error else RuntimeError(f"Failed after {max_retries} attempts")
+        if last_error:
+            self.logger.error(f"Failed after {max_retries} retries: {last_error}")
+            raise last_error
     
     async def setup(self):
-        """Set up the summariser agent."""
+        """Initialize the summariser agent, retrieving secrets and setting up clients."""
         try:
-            # Set up S3 client
-            session = aioboto3.Session()
-            self.s3_client = session.client(
-                service_name="s3",
-                endpoint_url=MINIO_ENDPOINT,
-                aws_access_key_id=os.getenv("MINIO_ROOT_USER", "minio"),
-                aws_secret_access_key=os.getenv("MINIO_ROOT_PASSWORD", "minio_pwd"),
-            )
+            self.logger.info("Setting up summariser agent...")
             
-            # Set up OpenAI client
-            openai_api_key_value = self.secrets_manager.get_secret("openai_key")
-            if not openai_api_key_value:
-                self.logger.error("OPENAI_API_KEY not found. Please ensure 'openai_key' is set in Vault or Docker secrets.")
-                raise ValueError("OPENAI_API_KEY not configured")
-            self.openai_client = AsyncOpenAI(api_key=openai_api_key_value)
+            # 1. Get OpenAI API key from SecretsManager (which handles Vault, env vars, etc.)
+            try:
+                self.logger.info(f"Retrieving OpenAI API key using Vault mount: {self.secrets_manager.vault_mount}")
+                self.logger.info(f"Vault client authenticated: {self.secrets_manager.vault_client.is_authenticated() if self.secrets_manager.vault_client else False}")
+                self.logger.info(f"Vault URL: {self.secrets_manager.vault_url}")
+                
+                # Directly try to read from Vault for debugging
+                if self.secrets_manager.vault_client:
+                    debug_path = "api-keys" 
+                    self.logger.info(f"Attempting direct Vault read from {debug_path}")
+                    try:
+                        response = self.secrets_manager.vault_client.secrets.kv.v2.read_secret_version(
+                            path=debug_path,
+                            mount_point=self.secrets_manager.vault_mount
+                        )
+                        self.logger.info(f"Vault response keys: {list(response.get('data', {}).get('data', {}).keys()) if response else 'No response'}")
+                    except Exception as ve:
+                        self.logger.error(f"Direct Vault read failed: {ve}")
+                
+                # Now try the normal way
+                openai_api_key = self.secrets_manager.get_openai_api_key()
+                if not openai_api_key:
+                    self.logger.error("OpenAI API key not found in any secret source!")
+                    raise ValueError("OpenAI API key not configured")
+                else:
+                    self.logger.info("Successfully retrieved OpenAI API key")
+            except Exception as e:
+                self.logger.error(f"Failed to retrieve OpenAI API key: {e}", exc_info=True)
+                raise ValueError(f"OpenAI API key retrieval failed: {e}")
             
-            # Explicitly connect to PostgreSQL with better error handling and connection pooling
-            postgres_url = self.secrets_manager.get_secret("postgres_url")
+            # Initialize OpenAI client with retrieved API key
+            self.openai_client = AsyncOpenAI(api_key=openai_api_key)
+            self.logger.info("OpenAI client initialized")
+            
+            # 2. Get MinIO config for S3 client
+            minio_config = self.secrets_manager.get_minio_config()
+            self.logger.info(f"Successfully retrieved MinIO configuration from secrets")
+            
+            # No need to initialize s3_client here as we create per-operation clients in process_summarize
+            
+            # 3. Get PostgreSQL connection URL
+            postgres_url = self.secrets_manager.get_database_url()
             if not postgres_url:
-                self.logger.error("POSTGRES_URL not found. Please ensure 'postgres_url' is set in Vault or Docker secrets.")
-                raise ValueError("POSTGRES_URL not configured")
-            self.logger.info(f"Connecting to PostgreSQL with URL: {postgres_url}")
+                self.logger.error("PostgreSQL connection URL not found in any secret source!")
+                raise ValueError("PostgreSQL URL not configured")
+            self.logger.info(f"Database connection URL retrieved (using db: {postgres_url.split('/')[-1]})")
             
-            # Configure optimal pool size for summarizer agent to avoid too many connections
-            # Lower values than default to avoid overwhelming the database
-            min_pool_size = int(os.getenv("POSTGRES_MIN_CONNECTIONS", "1"))
-            max_pool_size = int(os.getenv("POSTGRES_MAX_CONNECTIONS", "5"))
+            # Configure optimal connection pool size
+            min_pool_size = int(os.getenv("DB_MIN_CONNECTIONS", "1"))
+            max_pool_size = int(os.getenv("DB_MAX_CONNECTIONS", "5"))
             self.logger.info(f"Using PostgreSQL connection pool with min={min_pool_size}, max={max_pool_size}")
             
-            # Print all environment variables for debugging
-            self.logger.info("Environment variables:")
-            for key, value in os.environ.items():
-                if 'PASSWORD' not in key and 'SECRET' not in key and 'KEY' not in key:
-                    self.logger.info(f"  {key}={value}")
-                else:
-                    self.logger.info(f"  {key}=*****")
-                    
-            # Initialize DB with custom pool size
+            # 4. Initialize DB client with connection pool
             if not hasattr(self, 'db') or self.db is None:
                 from _core._db import PostgresClient
                 self.db = PostgresClient(
@@ -379,38 +413,42 @@ class SummariserAgent(BaseAgent):
                     min_size=min_pool_size, 
                     max_size=max_pool_size
                 )
-                
-            # Ensure NATS connection is established before interacting with JetStream
+                self.logger.info("PostgreSQL client initialized with connection pool")
+            
+            # Connect to database
+            await self.db.connect()
+            self.logger.info("Successfully connected to PostgreSQL")
+            
+            # 5. Ensure NATS connection is established
             if not self.bus.nc:
                 await self.bus.connect()
+                self.logger.info("Connected to NATS")
 
-            # JetStream context from the connected bus
+            # Get JetStream context
             js = self.bus.js
 
-            # We'll use the stream created by the fetcher agent rather than creating our own
+            # Get NATS configuration
             nats_subject_prefix = os.getenv("NATS_SUBJECT_PREFIX", "ai-radar")
             stream_name = os.getenv("NATS_STREAM_NAME", "ai-radar-stream")
 
-            # Router expects bare subject (it will prepend the prefix automatically)
+            # Define subject for summarization tasks
             summarize_subject = "tasks.summarize"
             
-            # Check if the stream exists but don't try to modify it
+            # 6. Verify stream exists (created by fetcher agent)
             try:
                 await js.stream_info(stream_name)
                 self.logger.info(f"Using existing stream '{stream_name}'")
             except Exception as e:
-                # Log warning but continue - the fetcher agent should create the stream
-                self.logger.warning(f"Stream exists or error: {e}")
+                self.logger.warning(f"Stream info error (may be created by fetcher): {e}")
             
-            # Register message handlers using the full subject name (with prefix)
+            # 7. Set up message handler for summarization tasks
             self.logger.info(f"Subscribing to NATS subject: {nats_subject_prefix}.{summarize_subject}")
             
             @self.router.on(summarize_subject)
             async def handle_summarize(payload, subject, reply):
-                # Log the received message for debugging
                 self.logger.info(f"Received message on {subject}: {json.dumps(payload)[:100]}...")
                 
-                # Convert payload to a message object that matches what process_summarize expects
+                # Convert payload to match what process_summarize expects
                 class Message:
                     def __init__(self, data, subject):
                         self.data = data
@@ -421,13 +459,13 @@ class SummariserAgent(BaseAgent):
                 msg = Message(json.dumps(payload).encode(), subject)
                 await self.process_summarize(msg)
             
-            # Start the router
+            # 8. Start the router
             await self.router.start()
             
             self.logger.info("Summariser agent setup complete")
             
         except Exception as e:
-            self.logger.error(f"Error in setup: {e}")
+            self.logger.error(f"Error in setup: {e}", exc_info=True)
             raise
     
     async def teardown(self):

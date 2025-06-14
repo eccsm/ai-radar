@@ -1,0 +1,13 @@
+﻿apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ai-radar-config
+  namespace: ai-radar
+data:
+  PYTHONUNBUFFERED: "1"
+  VAULT_ADDR: "http://vault:8200"
+  NATS_SUBJECT_PREFIX: "ai-radar"
+  NATS_STREAM_NAME: "ai-radar"
+  LOG_LEVEL: "INFO"
+  BUCKET_NAME: "ai-radar-content"
+---

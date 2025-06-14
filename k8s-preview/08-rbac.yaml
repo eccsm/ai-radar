@@ -1,0 +1,30 @@
+﻿apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ai-radar-sa
+  namespace: ai-radar
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ai-radar-role
+  namespace: ai-radar
+rules:
+- apiGroups: [""] # "" indicates the core API group
+  resources: ["pods", "services", "configmaps", "secrets"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ai-radar-rolebinding
+  namespace: ai-radar
+subjects:
+- kind: ServiceAccount
+  name: ai-radar-sa
+  namespace: ai-radar
+roleRef:
+  kind: Role
+  name: ai-radar-role
+  apiGroup: rbac.authorization.k8s.io
+---

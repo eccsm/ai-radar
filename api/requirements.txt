@@ -1,8 +1,17 @@
-fastapi==0.103.1
-uvicorn==0.23.2
-asyncpg==0.28.0
-pydantic==2.3.0
-python-dotenv==1.0.0
-python-jose==3.3.0
-passlib==1.7.4
+# api/requirements.txt - Enhanced API dependencies
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+asyncpg==0.29.0
+hvac==2.1.0
+python-jose[cryptography]==3.3.0
 python-multipart==0.0.6
+httpx==0.25.0
+pydantic==2.5.0
+pydantic-settings==2.1.0
+PyJWT==2.8.0
+nats-py==2.5.0
+
+# API Development dependencies
+pytest==7.4.3
+pytest-asyncio==0.21.1
+httpx==0.25.0

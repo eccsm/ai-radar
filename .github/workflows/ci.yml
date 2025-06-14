@@ -1,0 +1,63 @@
+name: AI Radar CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  integration-tests:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        
+    - name: Install test dependencies
+      run: |
+        pip install pytest pytest-asyncio httpx asyncpg nats-py
+        
+    - name: Create secrets directory
+      run: |
+        mkdir -p secrets
+        echo "ai_pwd" > secrets/pg_pass.txt
+        echo "minio" > secrets/minio_user.txt
+        echo "minio_pwd" > secrets/minio_pass.txt
+        echo "postgresql://ai:ai_pwd@localhost:5432/ai_radar" > secrets/postgres_url.txt
+        echo "nats://localhost:4222" > secrets/nats_url.txt
+        echo "your_openai_key_here" > secrets/openai_key.txt
+        
+    - name: Start services
+      run: |
+        docker compose --profile dev up -d
+        
+    - name: Wait for services to be healthy
+      run: |
+        timeout 300 bash -c 'until docker compose ps | grep -q "healthy"; do sleep 5; done'
+        
+    - name: Run integration tests
+      run: |
+        python -m pytest tests/integration/ -v
+        
+    - name: Collect logs on failure
+      if: failure()
+      run: |
+        docker compose logs > docker-logs.txt
+        
+    - name: Upload logs
+      if: failure()
+      uses: actions/upload-artifact@v3
+      with:
+        name: docker-logs
+        path: docker-logs.txt
+        
+    - name: Cleanup
+      if: always()
+      run: |
+        docker compose down -v

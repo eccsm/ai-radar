@@ -1,21 +1,23 @@
-# Enhanced Docker Compose configuration for AI Radar
-# Implements pre-Helm enhancements for Kubernetes readiness
+# docker-compose.yml - Working configuration for AI Radar
+# Works with external vault created by ai-radar.ps1
 
-# Base environment variables for Python services
+# Base environment variables
 x-env: &base-env
   PYTHONUNBUFFERED: "1"
-  # Use secrets for sensitive values
-  POSTGRES_URL_FILE: /run/secrets/postgres_url
-  NATS_URL_FILE: /run/secrets/nats_url
-  MINIO_ENDPOINT_FILE: /run/secrets/minio_endpoint
+  DB_HOST: db
+  DB_PORT: 5432
+  DB_USER: ai
+  DB_PASSWORD: ai_pwd
+  DB_NAME: ai_radar
+  NATS_URL: nats://nats:4222
+  MINIO_ENDPOINT: http://minio:9000
+  MINIO_ACCESS_KEY: minio
+  MINIO_SECRET_KEY: minio_pwd
+  VAULT_ADDR: http://host.docker.internal:8200
 
-# Base service configuration with common settings
+# Base service configuration
 x-service-base: &service-base
   restart: on-failure
-  labels:
-    io.prometheus.scrape: "true"
-    io.prometheus.port: "8000"
-    io.prometheus.path: "/metrics"
   deploy:
     resources:
       limits:
@@ -25,94 +27,17 @@ x-service-base: &service-base
         cpus: '0.1'
         memory: 128M
 
-# Python service base with common build configuration
-# Vault Agent configuration for services
-x-vault-agent: &vault-agent
-  image: hashicorp/vault:1.15
-  entrypoint: /bin/sh
-  command: |
-    -c "vault agent -config=/vault/config/agent.hcl"
-  environment:
-    VAULT_ADDR: http://vault:8200
-  volumes:
-    - ./hcl:/vault/config
-    - ./secrets:/vault/secrets
-  depends_on:
-    vault:
-      condition: service_healthy
-    vault-init:
-      condition: service_completed_successfully
-  networks:
-    - backplane
-
-x-python-service: &python-service
-  <<: *service-base
-  environment:
-    <<: *base-env
-    # Vault integration
-    VAULT_ADDR: http://vault:8200
-    VAULT_TOKEN: root
-  build:
-    context: .
-    args:
-      - INSTALL_DEV=false
-  volumes:
-    - ./secrets:/run/secrets
-  networks:
-    - backplane
-  depends_on:
-    vault:
-      condition: service_healthy
-  
 services:
-  # ─────────────────────────────────────────────────────────── VAULT ──
-  vault:
-    <<: *service-base
-    image: hashicorp/vault:1.15
-    command: server -dev
-    cap_add:
-      - IPC_LOCK
-    ports:
-      - "8200:8200"
-    environment:
-      VAULT_DEV_ROOT_TOKEN_ID: root
-      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
-    healthcheck:
-      test: ["CMD-SHELL", "VAULT_ADDR=http://127.0.0.1:8200 vault status"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 5s
-    networks:
-      - backplane
-
-  # Vault initialization container
-  vault-init:
-    image: hashicorp/vault:1.15
-    depends_on:
-      vault:
-        condition: service_healthy
-    environment:
-      VAULT_ADDR: http://vault:8200
-      VAULT_TOKEN: root
-    entrypoint: /bin/sh
-    command: |
-      -c "vault secrets enable -path=ai-radar kv-v2 || true && \
-          vault kv put ai-radar/database host=db port=5432 username=ai password=ai_pwd database=ai_radar && \
-          vault kv put ai-radar/nats host=nats port=4222 subject_prefix=ai-radar stream_name=ai-radar && \
-          vault kv put ai-radar/minio endpoint=minio:9000 access_key=minio secret_key=minio_pwd bucket=ai-radar-content && \
-          vault kv put ai-radar/api-keys newsapi=your_newsapi_key_here openai=your_openai_key_here slack=your_slack_webhook_here"
-    networks:
-      - backplane
-
   # ─────────────────────────────────────────────────────────── CORE INFRASTRUCTURE ──
   db:
     <<: *service-base
-    image: ramsrib/pgvector:16
+    build:
+      context: .
+      dockerfile: Dockerfile.db
     environment:
       POSTGRES_DB: ai_radar
       POSTGRES_USER: ai
-      POSTGRES_PASSWORD_FILE: /run/secrets/pg_pass
+      POSTGRES_PASSWORD: ai_pwd
     ports:
       - "5432:5432"
     healthcheck:
@@ -123,21 +48,16 @@ services:
       start_period: 10s
     volumes:
       - pg_data:/var/lib/postgresql/data
-      - ./init-db.sql:/docker-entrypoint-initdb.d/01-init-db.sql
-      - ./init-pgvector.sql:/docker-entrypoint-initdb.d/02-init-pgvector.sql
-      - ./copy-tables.sql:/docker-entrypoint-initdb.d/03-copy-tables.sql
     networks:
       - backplane
-    secrets:
-      - pg_pass
 
   nats:
     <<: *service-base
-    image: nats:2.10-alpine
+    image: nats:2.10.7-alpine
     command: -js -m 8222
     ports:
       - "4222:4222"
-      - "8222:8222"  # Monitoring port
+      - "8222:8222"
     healthcheck:
       test: ["CMD", "wget", "--spider", "http://localhost:8222/healthz"]
       interval: 10s
@@ -153,8 +73,8 @@ services:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER_FILE: /run/secrets/minio_user
-      MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_pass
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio_pwd
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -169,11 +89,8 @@ services:
     networks:
       - backplane
       - public
-    secrets:
-      - minio_user
-      - minio_pass
 
-  # Initial setup for MinIO buckets
+  # MinIO bucket initialization
   toolhub:
     image: minio/mc:latest
     depends_on:
@@ -182,262 +99,146 @@ services:
     entrypoint: /bin/sh
     command: |
       -c "
-      until (mc config host add minio http://minio:9000 minio minio_pwd) do echo 'Waiting for MinIO to be ready...' && sleep 1; done;
+      until (mc alias set minio http://minio:9000 minio minio_pwd) do echo 'Waiting for MinIO...' && sleep 1; done;
       mc mb minio/ai-radar-content --ignore-existing;
       mc mb minio/ai-radar-backups --ignore-existing;
       mc anonymous set download minio/ai-radar-content;
+      echo 'MinIO buckets configured successfully';
       "
     networks:
       - backplane
-    secrets:
-      - minio_user
-      - minio_pass
 
-  # ─────────────────────────────────────────────────────────── AGENT SERVICES ──
-  fetcher-agent:
+  # ─────────────────────────────────────────────────────────── SCHEDULER ──
+  scheduler:
     build:
-      context: .
-      dockerfile: ./agents/fetcher/Dockerfile
+      context: ./scheduler
+      dockerfile: Dockerfile
     <<: *service-base
     environment:
       <<: *base-env
-      HEALTH_PORT: 8000
+      API_BASE_URL: http://api:8000
+      PYTHONPATH: /app
+      FETCH_INTERVAL: "3600"  # 1 hour for production (was 1800/30min)
+      STATS_INTERVAL: "3600"  # 1 hour by default
+      ADMIN_USERNAME: admin
+      ADMIN_PASSWORD: admin
+      NATS_SUBJECT_PREFIX: ai-radar
+      NATS_STREAM_NAME: ai-radar-tasks # Default stream name for tasks
     depends_on:
+      db:
+        condition: service_healthy
       nats:
         condition: service_healthy
+    networks:
+      - backplane
+    profiles:
+      - dev
+      - prod
+
+  # ─────────────────────────────────────────────────────────── AGENTS ───────────────
+  fetcher:
+    build:
+      context: ./agents/fetcher
+      dockerfile: Dockerfile
+      target: production
+    <<: *service-base
+    environment:
+      <<: *base-env
+      PYTHONPATH: /app
+    volumes:
+      - ./_core:/app/_core:ro
+    depends_on:
       db:
+        condition: service_healthy
+      nats:
         condition: service_healthy
       minio:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 20s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
     networks:
       - backplane
-      - public
-    volumes:
-      - ./hcl/templates:/vault/templates
-    secrets:
-      - postgres_url
-      - nats_url
-      - minio_endpoint
-      - newsapi_key
-    profiles:
-      - prod
-        
-  # Development version with code mounting
-  fetcher-agent-dev:
-    build:
-      context: .
-      dockerfile: ./agents/fetcher/Dockerfile
-      target: development
-    container_name: fetcher-agent-dev
-    hostname: fetcher-agent-dev
     profiles:
       - dev
-    working_dir: /app/agents/fetcher
-    environment:
-      PYTHONPATH: /app
-    networks:
-      - backplane
-      - public
-    volumes:
-      - .:/app:rw
-      - ./hcl/fetcher.hcl:/vault/config.hcl
-    secrets:
-      - postgres_url
-      - nats_url
-      - minio_endpoint
-      - newsapi_key
-      
-  trigger-fetcher:
-    build:
-      context: .
-      dockerfile: ./tools/Dockerfile
-    <<: *service-base
-    environment:
-      <<: *base-env
-    depends_on:
-      nats:
-        condition: service_healthy
-    networks:
-      - backplane
-    secrets:
-      - nats_url
-    profiles:
       - prod
-      - dev
 
-  summariser-agent:
+  summariser:
     build:
-      context: ./agents
-      dockerfile: summariser/Dockerfile
+      context: ./agents/summariser
+      dockerfile: Dockerfile
+      target: ${BUILD_TARGET:-development}
     <<: *service-base
     environment:
       <<: *base-env
-      HEALTH_PORT: 8001
+      PYTHONPATH: /app
+
     depends_on:
-      nats:
-        condition: service_healthy
       db:
+        condition: service_healthy
+      nats:
         condition: service_healthy
       minio:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
-      interval: 20s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
+    volumes:
+      - ./_core:/app/_core:ro
+      - ./agents/_core:/app/agents/_core:ro
+      - ./agents/summariser/main.py:/app/main.py:ro
     networks:
       - backplane
       - public
-    volumes:
-      - ./hcl/templates:/vault/templates
-    secrets:
-      - postgres_url
-      - nats_url
-      - minio_endpoint
-      - openai_key
-    profiles:
-      - prod
-        
-  # Development version with code mounting
-  summariser-agent-dev:
-    build:
-      context: .
-      dockerfile: ./agents/summariser/Dockerfile
-      target: development
-    container_name: summariser-agent-dev
-    hostname: summariser-agent-dev
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     profiles:
       - dev
-    working_dir: /app/agents/summariser
-    environment:
-      PYTHONPATH: /app
-    networks:
-      - backplane
-      - public
-    volumes:
-      - .:/app:rw
-      - ./hcl/summariser.hcl:/vault/config.hcl
-    secrets:
-      - postgres_url
-      - nats_url
-      - minio_endpoint
-      - openai_key
+      - prod
 
-  ranker-agent:
+  ranker:
     build:
-      context: ./agents
-      dockerfile: ranker/Dockerfile
+      context: ./agents/ranker
+      dockerfile: Dockerfile
+      target: ${BUILD_TARGET:-development}
     <<: *service-base
     environment:
       <<: *base-env
-      HEALTH_PORT: 8002
+      PYTHONPATH: /app
     depends_on:
-      nats:
-        condition: service_healthy
       db:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
-      interval: 20s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
+      nats:
+        condition: service_healthy
+    volumes:
+      - ./_core:/app/_core:ro
+      - ./agents/_core:/app/agents/_core:ro
+      - ./agents/ranker/main.py:/app/main.py:ro
     networks:
       - backplane
-    volumes:
-      - ./hcl/templates:/vault/templates
-    secrets:
-      - postgres_url
-      - nats_url
-      - openai_key
-    profiles:
-      - prod
-        
-  # Development version with code mounting
-  ranker-agent-dev:
-    build:
-      context: .
-      dockerfile: ./agents/ranker/Dockerfile
-      target: development
-    container_name: ranker-agent-dev
-    hostname: ranker-agent-dev
     profiles:
       - dev
-    working_dir: /app/agents/ranker
-    environment:
-      PYTHONPATH: /app
-    networks:
-      - backplane
-      - public
-    volumes:
-      - .:/app:rw
-      - ./hcl/ranker.hcl:/vault/config.hcl
-    secrets:
-      - postgres_url
-      - nats_url
-      - openai_key
+      - prod
 
-  scheduler-agent:
+  sharer:
     build:
-      context: ./agents
-      dockerfile: scheduler/Dockerfile
+      context: ./agents/sharer
+      dockerfile: Dockerfile
+      target: ${BUILD_TARGET:-development}
     <<: *service-base
     environment:
       <<: *base-env
-      HEALTH_PORT: 8003
-      CRON_RRULE: "RRULE:FREQ=MINUTELY;INTERVAL=30"
+      PYTHONPATH: /app
     depends_on:
-      nats:
-        condition: service_healthy
       db:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
-      interval: 20s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
+      nats:
+        condition: service_healthy
+    volumes:
+      - ./_core:/app/_core:ro
+      - ./agents/_core:/app/agents/_core:ro
+      - ./agents/sharer/main.py:/app/main.py:ro
     networks:
       - backplane
-    volumes:
-      - ./hcl/templates:/vault/templates
-    secrets:
-      - postgres_url
-      - nats_url
-    profiles:
-      - prod
-        
-  # Development version with code mounting
-  scheduler-agent-dev:
-    build:
-      context: .
-      dockerfile: ./agents/scheduler/Dockerfile
-      target: development
-    container_name: scheduler-agent-dev
-    hostname: scheduler-agent-dev
     profiles:
       - dev
-    working_dir: /app/agents/scheduler
-    environment:
-      PYTHONPATH: /app
-    networks:
-      - backplane
-    volumes:
-      - .:/app:rw
-      - ./hcl/scheduler.hcl:/vault/config.hcl
-    secrets:
-      - postgres_url
-      - nats_url
+      - prod
 
   # ─────────────────────────────────────────────────────────── USER INTERFACE ──
-  # API service for the frontend
   api:
     build:
       context: ./api
@@ -447,14 +248,18 @@ services:
       - "8000:8000"
     environment:
       <<: *base-env
-      PYTHONPATH: /app:/app/parent  # Add parent to Python path
+      PYTHONPATH: /app:/app/parent
     depends_on:
       db:
         condition: service_healthy
+      nats:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
     volumes:
-      - ./_core:/app/parent/_core:ro  # Mount _core as read-only
+      - ./_core:/app/_core:ro
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8000/healthz"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
       interval: 20s
       timeout: 5s
       retries: 3
@@ -462,66 +267,70 @@ services:
     networks:
       - backplane
       - public
-    secrets:
-      - postgres_url
-      - nats_url
-      - openai_key
-  
-  # React UI frontend
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    profiles:
+      - dev
+      - prod
+
+  # Production UI (minimal version for base compose)
   ui:
-    build:
-      context: ./ai-radar-ui
-      dockerfile: Dockerfile
+    image: nginx:alpine
     <<: *service-base
     ports:
-      - "3000:${UI_PORT:-80}"  # Serve on port 3000 externally
-    environment:
-      - REACT_APP_API_URL=http://localhost:8000/api
-      - NODE_ENV=${NODE_ENV:-production}
-    depends_on:
-      api:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:${UI_PORT:-80}"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
+      - "3000:80"
+    volumes:
+      - ./ui-placeholder:/usr/share/nginx/html:ro
     networks:
       - public
     profiles:
       - prod
 
-  # React UI frontend (Development Mode)
+  # Development UI
   ui-dev:
     build:
       context: ./ai-radar-ui
       dockerfile: Dockerfile.dev
     <<: *service-base
     ports:
-      - "3000:3000"  # React dev server port
+      - "3000:3000"
     environment:
       - REACT_APP_API_URL=http://localhost:8000/api
       - NODE_ENV=development
-      - CHOKIDAR_USEPOLLING=true  # Enable hot reloading in Docker
     volumes:
-      - ./ai-radar-ui:/app:rw  # Mount source for hot reloading
-      - /app/node_modules  # Prevent node_modules from being overwritten
-    depends_on:
-      api:
-        condition: service_healthy
+      - ./ai-radar-ui:/app:rw
+      - /app/node_modules
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s  # Longer start period for dev server
+      start_period: 40s
     networks:
       - public
     profiles:
       - dev
-        
-  # ─────────────────────────────────────────────────────────── MONITORING TOOLS ──
+
+  # ─────────────────────────────────────────────────────────── DEVELOPMENT TOOLS ──
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    <<: *service-base
+    ports:
+      - "5050:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_CHECK_EMAIL_DELIVERABILITY: "False"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      - db
+    networks:
+      - public
+    profiles:
+      - dev
+
+  # ─────────────────────────────────────────────────────────── MONITORING ──
   prometheus:
     image: prom/prometheus:latest
     <<: *service-base
@@ -533,18 +342,11 @@ services:
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
-      - '--web.console.libraries=/etc/prometheus/console_libraries'
-      - '--web.console.templates=/etc/prometheus/consoles'
       - '--web.enable-lifecycle'
-    depends_on:
-      - nats
-      - db
-      - minio
     networks:
       - backplane
       - public
     profiles:
-      - prod
       - dev
 
   grafana:
@@ -554,113 +356,18 @@ services:
       - "33000:3000"
     volumes:
       - grafana_data:/var/lib/grafana
-      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
     environment:
-      - GF_SECURITY_ADMIN_USER_FILE=/run/secrets/grafana_user
-      - GF_SECURITY_ADMIN_PASSWORD_FILE=/run/secrets/grafana_pass
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
       - GF_USERS_ALLOW_SIGN_UP=false
     depends_on:
       - prometheus
       - loki
     networks:
       - public
-    secrets:
-      - grafana_user
-      - grafana_pass
-    profiles:
-      - prod
-      - dev
-
-  pgadmin:
-    image: dpage/pgadmin4:latest
-    <<: *service-base
-    ports:
-      - "5050:80"
-    environment:
-      PGADMIN_DEFAULT_EMAIL: admin@example.com
-      PGADMIN_DEFAULT_PASSWORD: admin
-      PGADMIN_CONFIG_CHECK_EMAIL_DELIVERABILITY: "False"
-      PGADMIN_CONFIG_ALLOW_SPECIAL_EMAIL_DOMAINS: "True"
-    volumes:
-      - pgadmin_data:/var/lib/pgadmin
-    depends_on:
-      - db
-    networks:
-      - public
-    secrets:
-      - pgadmin_email
-      - pgadmin_pass
     profiles:
       - dev
 
-  portainer:
-    image: portainer/portainer-ce:latest
-    <<: *service-base
-    ports:
-      - "9999:9000"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - portainer_data:/data
-    command: -H unix:///var/run/docker.sock
-    networks:
-      - public
-    profiles:
-      - dev
-    
-  cadvisor:
-    image: gcr.io/cadvisor/cadvisor:latest
-    <<: *service-base
-    ports:
-      - "8081:8080"
-    volumes:
-      - /:/rootfs:ro
-      - /var/run:/var/run:ro
-      - /sys:/sys:ro
-      - /var/lib/docker/:/var/lib/docker:ro
-      - /dev/disk/:/dev/disk:ro
-    privileged: true
-    devices:
-      - /dev/kmsg:/dev/kmsg
-    networks:
-      - public
-    profiles:
-      - dev
-      
-  postgres-exporter:
-    image: prometheuscommunity/postgres-exporter:latest
-    <<: *service-base
-    ports:
-      - "9187:9187"
-    environment:
-      DATA_SOURCE_NAME_FILE: /run/secrets/postgres_exporter_dsn
-    depends_on:
-      db:
-        condition: service_healthy
-    networks:
-      - backplane
-    secrets:
-      - postgres_exporter_dsn
-    profiles:
-      - prod
-      - dev
-      
-  # Temporarily disabled due to image pull issues
-  # nats-exporter:
-  #   image: natsio/prometheus-nats-exporter:latest
-  #   <<: *service-base
-  #   command: -varz -connz -subz -jetstream http://nats:8222
-  #   ports:
-  #     - "7777:7777"
-  #   depends_on:
-  #     nats:
-  #       condition: service_healthy
-  #   networks:
-  #     - backplane
-  #   profiles:
-  #     - prod
-  #     - dev
-      
-  # ─────────────────────────────────────────────────────────── CENTRAL LOGGING ──
   loki:
     image: grafana/loki:3.0.0
     <<: *service-base
@@ -680,7 +387,6 @@ services:
       - backplane
       - public
     profiles:
-      - prod
       - dev
 
   promtail:
@@ -696,43 +402,81 @@ services:
     networks:
       - backplane
     profiles:
-      - prod
       - dev
-      
-  # ─────────────────────────────────────────────────────────── BACKUP ──
-  backup:
-    image: postgres:16
+
+  portainer:
+    image: portainer/portainer-ce:latest
     <<: *service-base
+    ports:
+      - "9999:9000"
     volumes:
-      - ./backups:/backups
-    environment:
-      PGPASSWORD_FILE: /run/secrets/pg_pass
-    entrypoint: |
-      bash -c '
-      while true; do
-        pg_dump -h db -U $${POSTGRES_USER:-ai} $${POSTGRES_DB:-ai_radar} > /backups/$$(date +%F).sql
-        mc config host add minio http://minio:9000 $${MINIO_ROOT_USER:-minio} $${MINIO_ROOT_PASSWORD:-minio_pwd}
-        mc cp /backups/$$(date +%F).sql minio/ai-radar-backups/
-        sleep 86400
-      '
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+    networks:
+      - public
+    profiles:
+      - dev
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    <<: *service-base
+    ports:
+      - "8081:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    privileged: true
+    networks:
+      - public
+    profiles:
+      - dev
+
+  nats-exporter:
+    image: natsio/prometheus-nats-exporter:latest
+    <<: *service-base
+    command: 
+      - "-varz"
+      - "-connz"
+      - "-subz"
+      - "-routez"
+      - "-jsz=all"
+      - "-port=7777"
+      - "http://nats:8222"
+    ports:
+      - "7777:7777"
     depends_on:
-      - db
-      - minio
+      nats:
+        condition: service_healthy
     networks:
       - backplane
-    secrets:
-      - pg_pass
+      - public
     profiles:
-      - prod
+      - dev
 
-# Define networks for proper segmentation
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:latest
+    <<: *service-base
+    ports:
+      - "9187:9187"
+    environment:
+      DATA_SOURCE_NAME: "postgresql://ai:ai_pwd@db:5432/ai_radar?sslmode=disable"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - backplane
+    profiles:
+      - dev
+
+# Networks
 networks:
   backplane:
-    internal: true  # Only accessible within Docker
+    internal: false
   public:
-    # External-facing network
 
-# Define volumes
+# Volumes
 volumes:
   pg_data:
   minio_data:
@@ -741,34 +485,3 @@ volumes:
   portainer_data:
   pgadmin_data:
   loki_data:
-
-# Define secrets
-secrets:
-  pg_pass:
-    file: ./secrets/pg_pass.txt
-  minio_user:
-    file: ./secrets/minio_user.txt
-  minio_pass:
-    file: ./secrets/minio_pass.txt
-  postgres_url:
-    file: ./secrets/postgres_url.txt
-  nats_url:
-    file: ./secrets/nats_url.txt
-  minio_endpoint:
-    file: ./secrets/minio_endpoint.txt
-  newsapi_key:
-    file: ./secrets/newsapi_key.txt
-  openai_key:
-    file: ./secrets/openai_key.txt
-  grafana_user:
-    file: ./secrets/grafana_user.txt
-  grafana_pass:
-    file: ./secrets/grafana_pass.txt
-  pgadmin_email:
-    file: ./secrets/pgadmin_email.txt
-  pgadmin_pass:
-    file: ./secrets/pgadmin_pass.txt
-  postgres_exporter_dsn:
-    file: ./secrets/postgres_exporter_dsn.txt
-  vault_token:
-    file: ./secrets/vault_token.txt

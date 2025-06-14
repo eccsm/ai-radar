@@ -1,0 +1,7 @@
+﻿apiVersion: v1
+kind: Namespace
+metadata:
+  name: ai-radar
+  labels:
+    name: ai-radar
+---

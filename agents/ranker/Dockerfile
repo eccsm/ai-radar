@@ -14,21 +14,20 @@ RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 # Copy requirements first for better caching
-COPY agents/ranker/requirements.txt .
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Create directory structure
+# Production stage - final image
+FROM base as production
+
+# _core module will be handled by PYTHONPATH and volume mount in docker-compose
+
+# Copy the critical files by name
+COPY main.py /app/main.py
+COPY requirements.txt /app/requirements.txt
+
+# Create _core directory 
 RUN mkdir -p /app/_core
-
-# Production stage
-FROM base AS production
-
-# Copy shared _core module
-COPY _core/ /app/_core/
-RUN pip install --no-cache-dir /app/_core/
-
-# Copy agent-specific code
-COPY agents/ranker/ .
 
 # Command to run the agent
 CMD ["python", "main.py"]
@@ -40,9 +39,8 @@ FROM base AS development
 # It will be mounted as a volume from the host
 # This allows for live code editing
 
-# Health check endpoint
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:${HEALTH_PORT:-8002}/health || exit 1
+# Create _core directory 
+RUN mkdir -p /app/_core
 
 # Command to run the agent in development mode
 CMD ["python", "main.py"]

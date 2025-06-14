@@ -14,21 +14,30 @@ RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 # Copy requirements first for better caching
-COPY agents/fetcher/requirements.txt .
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
-# Create directory structure
-RUN mkdir -p /app/_core
 
 # Production stage
 FROM base AS production
 
-# Copy shared _core module
-COPY _core/ /app/_core/
-RUN pip install --no-cache-dir /app/_core/
+# _core module will be handled by PYTHONPATH and volume mount in docker-compose
 
-# Copy agent-specific code
-COPY agents/fetcher/ .
+# VERY explicitly copy the critical files by name
+RUN echo "--- Listing build context (./agents/fetcher/) ---" && ls -la . && echo "--- End of listing ---"
+COPY ./main.py /app/main.py
+COPY test.py /app/test.py
+COPY requirements.txt /app/requirements.txt
+COPY healthz.py /app/healthz.py
+
+# Create _core directory and copy its contents
+RUN mkdir -p /app/_core
+
+# Add hvac for Vault integration
+RUN pip install hvac
+
+# Debug info
+RUN ls -la /app
+RUN echo "PYTHONPATH=$PYTHONPATH"
 
 # Command to run the agent
 CMD ["python", "main.py"]

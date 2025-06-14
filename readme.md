@@ -29,7 +29,7 @@ The AI Radar system consists of several components:
 
 1. Clone this repository:
    ```
-   git clone https://github.com/yourusername/ai-radar.git
+   git clone https://github.com/eccsm/ai-radar.git
    cd ai-radar
    ```
 

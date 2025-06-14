@@ -1,7 +1,7 @@
 import axios from 'axios';
 
 // Parse and handle API base URL without the trailing `/api` segment
-let baseURL = process.env.REACT_APP_API_URL || 'http://localhost:8001';
+let baseURL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 // Remove trailing `/api` if present to avoid path doubling
 const API_BASE_URL = baseURL.endsWith('/api') ? baseURL : `${baseURL}/api`;
 
@@ -39,14 +39,7 @@ apiClient.interceptors.response.use(
 const apiService = {
   // Authentication
   login: (username, password) => {
-    const formData = new URLSearchParams();
-    formData.append('username', username);
-    formData.append('password', password);
-    return apiClient.post('/auth/token', formData, {
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded'
-      }
-    });
+    return apiClient.post('/auth/token', { username, password });
   },
   getCurrentUser: () => apiClient.get('/auth/users/me'),
   
