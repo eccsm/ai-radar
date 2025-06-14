@@ -10,6 +10,7 @@ import asyncio
 import sys
 import socket
 from typing import Dict, Any, Optional, List
+import asyncpg
 
 # Add project root to path to import _core modules
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -185,3 +186,68 @@ class BaseAgent:
         This should be called when errors occur during message processing.
         """
         self.health.increment_errors()
+
+    async def retry_db_operation(self, operation, *args, max_retries=5, **kwargs):
+        """Retry a database operation with exponential backoff.
+
+        Args:
+            operation: Async function to call (e.g., self.db.fetch)
+            *args: Positional arguments for the operation
+            max_retries: Maximum number of retries
+            **kwargs: Keyword arguments for the operation
+
+        Returns:
+            Result of ``operation`` if successful
+
+        Raises:
+            Exception: If all attempts fail
+        """
+        retries = 0
+        last_error = None
+
+        while retries < max_retries:
+            try:
+                return await operation(*args, **kwargs)
+            except asyncpg.exceptions.ConnectionDoesNotExistError as e:
+                retries += 1
+                last_error = e
+                wait_time = 2 ** retries
+                self.logger.warning(
+                    f"Database connection error: {e}, retrying in {wait_time}s (attempt {retries}/{max_retries})"
+                )
+                await asyncio.sleep(wait_time)
+            except asyncpg.exceptions.TooManyConnectionsError as e:
+                retries += 1
+                last_error = e
+                wait_time = min(retries, 5)
+                self.logger.warning(
+                    f"Too many database connections, waiting before retry (attempt {retries}/{max_retries})"
+                )
+                await asyncio.sleep(wait_time)
+            except asyncpg.exceptions.PostgresConnectionError as e:
+                retries += 1
+                last_error = e
+                wait_time = 2 ** retries
+                self.logger.warning(
+                    f"PostgreSQL connection error: {e}, attempting to reconnect (attempt {retries}/{max_retries})"
+                )
+                try:
+                    await self.db.connect()
+                    self.logger.info("Successfully reconnected to PostgreSQL")
+                    continue
+                except Exception as reconnect_err:
+                    self.logger.error(f"Failed to reconnect to PostgreSQL: {reconnect_err}")
+                self.logger.info(f"Waiting {wait_time} seconds before retry...")
+                await asyncio.sleep(wait_time)
+            except Exception as e:
+                retries += 1
+                last_error = e
+                wait_time = 2 ** retries
+                self.logger.error(
+                    f"Database operation failed: {e}, retrying in {wait_time}s (attempt {retries}/{max_retries})"
+                )
+                await asyncio.sleep(wait_time)
+
+        if last_error:
+            self.logger.error(f"Failed after {max_retries} retries: {last_error}")
+            raise last_error
